@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.Python
+backend/venv311/
+env/
+venv/
+ENV/
+
+# Storage
+storage/*
+!storage/.gitkeep
+
+# SQLite
+*.db
+*.sqlite3
+
+# Node/Frontend
+node_modules/
+.npm/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Output
+*.pdf
+soya_crop_debug.jpg

@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LMPC Label Scanner</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React and ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div id="root"><p class="p-8 text-center text-gray-500">Loading Application...</p></div>
+
+    <script type="text/babel">
+        const { useState } = React;
+
+        function App() {
+            const [activeTab, setActiveTab] = useState('upload');
+            const [file, setFile] = useState(null);
+            const [location, setLocation] = useState('');
+            const [inspectorId, setInspectorId] = useState('INS-001');
+            const [result, setResult] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState(null);
+            const [reviewQueue, setReviewQueue] = useState([]);
+
+            const fetchReviewQueue = async () => {
+                try {
+                    const res = await fetch('http://localhost:8000/api/scans/review-queue');
+                    const data = await res.json();
+                    setReviewQueue(data);
+                } catch (err) {
+                    console.error('Failed to fetch review queue', err);
+                }
+            };
+
+            React.useEffect(() => {
+                if (activeTab === 'review') {
+                    fetchReviewQueue();
+                }
+            }, [activeTab]);
+
+            const handleFileChange = (e) => {
+                setFile(e.target.files[0]);
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                if (!file || !location || !inspectorId) {
+                    setError('Please fill in all required fields and select a file.');
+                    return;
+                }
+
+                setLoading(true);
+                setError(null);
+                setResult(null);
+
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('location', location);
+                formData.append('inspector_id', inspectorId);
+
+                try {
+                    const response = await fetch('http://localhost:8000/api/scans/upload', {
+                        method: 'POST',
+                        body: formData,
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Upload failed with status ' + response.status);
+                    }
+
+                    const data = await response.json();
+                    setResult(data);
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div class="max-w-4xl mx-auto p-6">
+                    <header class="mb-8 text-center">
+                        <h1 class="text-3xl font-bold text-gray-800">LMPC Label Scanner MVP</h1>
+                        <p class="text-gray-600 mt-2">Upload a packaged commodity label to check compliance.</p>
+                        <div class="mt-4 flex justify-center space-x-4">
+                            <button onClick={() => setActiveTab('upload')} class={`px-4 py-2 font-bold rounded ${activeTab === 'upload' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'}`}>Scan Label</button>
+                            <button onClick={() => setActiveTab('review')} class={`px-4 py-2 font-bold rounded ${activeTab === 'review' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-700'}`}>Review Queue</button>
+                        </div>
+                    </header>
+
+                    {activeTab === 'upload' && (
+                        <>
+                            <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                                <h2 class="text-xl font-semibold mb-4">Upload Scan</h2>
+                                <form onSubmit={handleSubmit} class="space-y-4">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700">Inspector ID</label>
+                                        <input type="text" value={inspectorId} onChange={(e) => setInspectorId(e.target.value)} class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2" required />
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700">Location</label>
+                                        <input type="text" value={location} onChange={(e) => setLocation(e.target.value)} class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2" required placeholder="e.g. Mumbai Warehouse" />
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700">Image</label>
+                                        <input type="file" accept="image/*" capture="environment" onChange={handleFileChange} class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" required />
+                                    </div>
+                                    <button type="submit" disabled={loading} class="w-full bg-blue-600 text-white font-bold py-2 px-4 rounded hover:bg-blue-700 disabled:opacity-50">
+                                        {loading ? 'Uploading...' : 'Submit Scan'}
+                                    </button>
+                                </form>
+                                {error && <p class="text-red-600 mt-4">{error}</p>}
+                            </div>
+
+                            {result && (
+                                <div class="bg-white border border-gray-200 p-6 rounded-lg shadow-md mt-8">
+                                    <div class="flex justify-between items-center mb-4">
+                                        <h2 class="text-xl font-semibold">Scan Report</h2>
+                                        <a href={`http://localhost:8000/api/scans/${result.id}/report`} target="_blank" download class="bg-indigo-600 text-white text-sm font-bold py-2 px-4 rounded hover:bg-indigo-700 flex items-center">
+                                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                                            Download PDF
+                                        </a>
+                                    </div>
+                                    <div class="mb-4">
+                                        <p><strong>Status:</strong> 
+                                            <span class={`ml-2 px-2 py-1 rounded text-sm font-bold ${
+                                                result.status === 'passed' ? 'bg-green-100 text-green-800' : 
+                                                result.status === 'failed' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'
+                                            }`}>
+                                                {result.status.toUpperCase()}
+                                            </span>
+                                        </p>
+                                    </div>
+                                    
+                                    <h3 class="text-lg font-semibold mt-6 mb-2">Validations</h3>
+                                    <div class="overflow-x-auto">
+                                        <table class="min-w-full bg-white border border-gray-200">
+                                            <thead class="bg-gray-50">
+                                                <tr>
+                                                    <th class="py-2 px-4 border-b text-left text-sm font-medium text-gray-700">Field</th>
+                                                    <th class="py-2 px-4 border-b text-left text-sm font-medium text-gray-700">Status</th>
+                                                    <th class="py-2 px-4 border-b text-left text-sm font-medium text-gray-700">Rule Clause</th>
+                                                    <th class="py-2 px-4 border-b text-left text-sm font-medium text-gray-700">Detail</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {result.validations && result.validations.map((val, idx) => (
+                                                    <tr key={idx} class="hover:bg-gray-50">
+                                                        <td class="py-2 px-4 border-b text-sm font-medium capitalize">{val.field_type}</td>
+                                                        <td class="py-2 px-4 border-b text-sm">
+                                                            <span class={`px-2 py-1 rounded text-xs font-bold ${
+                                                                val.status === 'present' ? 'bg-green-100 text-green-800' : 
+                                                                val.status === 'absent' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'
+                                                            }`}>
+                                                                {val.status.toUpperCase()}
+                                                            </span>
+                                                        </td>
+                                                        <td class="py-2 px-4 border-b text-sm text-gray-600">{val.rule_clause}</td>
+                                                        <td class="py-2 px-4 border-b text-sm text-gray-600">{val.detail}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+                        </>
+                    )}
+
+                    {activeTab === 'review' && (
+                        <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                            <h2 class="text-xl font-semibold mb-4">Manual Review Queue</h2>
+                            {reviewQueue.length === 0 ? (
+                                <p class="text-gray-500">No items pending review.</p>
+                            ) : (
+                                <div class="overflow-x-auto">
+                                    <table class="min-w-full bg-white border border-gray-200">
+                                        <thead class="bg-gray-50">
+                                            <tr>
+                                                <th class="py-2 px-4 border-b text-left text-sm font-medium text-gray-700">Scan ID</th>
+                                                <th class="py-2 px-4 border-b text-left text-sm font-medium text-gray-700">Inspector</th>
+                                                <th class="py-2 px-4 border-b text-left text-sm font-medium text-gray-700">Reason for Review</th>
+                                                <th class="py-2 px-4 border-b text-left text-sm font-medium text-gray-700">Status</th>
+                                                <th class="py-2 px-4 border-b text-left text-sm font-medium text-gray-700">Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {reviewQueue.map((item) => (
+                                                <tr key={item.id} class="hover:bg-gray-50">
+                                                    <td class="py-2 px-4 border-b text-sm font-medium">#{item.scan_id}</td>
+                                                    <td class="py-2 px-4 border-b text-sm">{item.inspector_id}</td>
+                                                    <td class="py-2 px-4 border-b text-sm text-red-600">{item.reason}</td>
+                                                    <td class="py-2 px-4 border-b text-sm capitalize font-bold text-yellow-600">{item.status}</td>
+                                                    <td class="py-2 px-4 border-b text-sm">
+                                                        <a href={`http://localhost:8000/api/scans/${item.scan_id}/report`} target="_blank" download class="text-indigo-600 hover:text-indigo-900 font-medium text-xs">Download PDF</a>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
