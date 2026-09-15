@@ -28,3 +28,11 @@ Thumbs.db
 # Output
 *.pdf
 soya_crop_debug.jpg
+
+# Test logs & debug artifacts
+*.log
+backend/test_crop_out.jpg
+backend/test_digits.png
+backend/test_label.jpg
+backend/replacement.txt
+backend/sql_app.db
