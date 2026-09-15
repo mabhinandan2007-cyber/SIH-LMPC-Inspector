@@ -390,33 +390,31 @@ _UNIT_ALIASES: dict[str, str] = {
 }
 
 
-def evaluate_net_quantity_rule(
-    netqty_fields: list[dict],
+def _evaluate_physical_quantity_rule(
+    fields: list[dict],
     raw_regions: list[dict],
+    field_id: str,
+    semantic_field: str,
+    rule_clause: str,
+    unit_regex: str,
+    unit_aliases: dict[str, str],
     image_path: Optional[str] = None,
 ) -> Verdict:
     """
-    Evaluate the Net Quantity declaration using unit-aware spatial
-    candidate scoring.
-
-    Only candidates that contain a recognised physical unit
-    (g, kg, mg, ml, l, etc.) are considered.  Units are normalised
-    to a canonical form (e.g. ``gms`` → ``g``).
-
-    The blacklist excludes dates, MRP-prefixed prices, phone numbers,
-    and per-unit prices (e.g. ``0.83/ml``) from candidacy.
+    Shared helper to evaluate physical quantities (Net Quantity, Volume)
+    using unit-aware spatial candidate scoring.
     """
-    if not netqty_fields:
+    if not fields:
         return {
             "status": "uncertain",
-            "rule_clause": "Rule 6(1)(c)",
-            "detail": "No net_quantity keywords found on the label. Manual review required.",
+            "rule_clause": rule_clause,
+            "detail": "No {field_id} keywords found on the label. Manual review required.",
         }
 
     best_overall_score: float = -9999
     best_overall_candidate: Optional[dict] = None
 
-    for field in netqty_fields:
+    for field in fields:
         if field.get("confidence", 1.0) < 0.1:
             continue
 
@@ -463,10 +461,7 @@ def evaluate_net_quantity_rule(
             or ``(-9999, None, None, None)`` if no unit-bearing number
             is found.
             """
-            matches = list(re.finditer(
-                r"(?i)\b(\d+(?:[.\-]\d+)?)\s*(g|gm|gms|grams|kg|mg|ml|l|litres?|liters?)\b",
-                text.lower(),
-            ))
+            matches = list(re.finditer(unit_regex, text.lower()))
             if not matches:
                 return -9999, None, None, None
 
@@ -478,7 +473,7 @@ def evaluate_net_quantity_rule(
             for m in matches:
                 val_str = m.group(1).replace("-", ".")
                 unit_str = m.group(2).lower()
-                norm_unit = _UNIT_ALIASES.get(unit_str, unit_str)
+                norm_unit = unit_aliases.get(unit_str, unit_str)
 
                 val_score = 100.0  # base score for having a valid unit
                 if val_str in bad_numbers:
@@ -575,11 +570,13 @@ def evaluate_net_quantity_rule(
     if best_overall_candidate and best_overall_score > -500:
         return {
             "status": "present",
-            "rule_clause": "Rule 6(1)(c)",
-            "detail": f"Valid net_quantity declaration found: '{best_overall_candidate['raw_text']}'",
-            "field": "NET_QUANTITY",
+            "rule_clause": rule_clause,
+            "detail": f"Valid {field_id} declaration found: '{best_overall_candidate['raw_text']}'",
+            "field": semantic_field,
             "value": float(best_overall_candidate["value"]),
             "unit": best_overall_candidate["unit"],
+            "normalized_value": float(best_overall_candidate["value"]),
+            "normalized_unit": best_overall_candidate["unit"],
             "raw_text": best_overall_candidate["raw_text"],
             "label_bbox": best_overall_candidate["label_bbox"],
             "value_bbox": best_overall_candidate["bbox"],
@@ -588,12 +585,51 @@ def evaluate_net_quantity_rule(
 
     return {
         "status": "uncertain",
-        "rule_clause": "Rule 6(1)(c)",
-        "detail": "No valid net_quantity declaration detected - needs manual confirmation.",
+        "rule_clause": rule_clause,
+        "detail": f"No valid {field_id} declaration detected - needs manual confirmation.",
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+def evaluate_net_quantity_rule(
+    netqty_fields: list[dict],
+    raw_regions: list[dict],
+    image_path: Optional[str] = None,
+) -> Verdict:
+    """Evaluate the Net Quantity declaration."""
+    unit_regex = r"(?i)\b(\d+(?:[.\-]\d+)?)\s*(g|gm|gms|grams|kg|mg|ml|l|litres?|liters?)\b"
+    return _evaluate_physical_quantity_rule(
+        fields=netqty_fields,
+        raw_regions=raw_regions,
+        field_id="net_quantity",
+        semantic_field="NET_QUANTITY",
+        rule_clause="Rule 6(1)(c)",
+        unit_regex=unit_regex,
+        unit_aliases=_UNIT_ALIASES,
+        image_path=image_path
+    )
+
+def evaluate_volume_rule(
+    volume_fields: list[dict],
+    raw_regions: list[dict],
+    image_path: Optional[str] = None,
+) -> Verdict:
+    """Evaluate the Volume declaration."""
+    unit_regex = r"(?i)\b(\d+(?:[.\-]\d+)?)\s*(ml|mi|l|litres?|liters?)\b"
+    return _evaluate_physical_quantity_rule(
+        fields=volume_fields,
+        raw_regions=raw_regions,
+        field_id="volume",
+        semantic_field="VOLUME",
+        rule_clause="Rule 6(1)(c)",
+        unit_regex=unit_regex,
+        unit_aliases={"litres": "l", "liters": "l", "litre": "l", "liter": "l", "mi": "ml"},
+        image_path=image_path
+    )
+
+
 # Orchestrator
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -620,5 +656,10 @@ def run_rule_engine(
     netqty_result = evaluate_net_quantity_rule(netqty_fields, raw_regions, image_path)
     netqty_result["field_type"] = "net_quantity"
     results.append(netqty_result)
+
+    volume_fields = [f for f in classified_fields if f["field_type"] == "volume"]
+    volume_result = evaluate_volume_rule(volume_fields, raw_regions, image_path)
+    volume_result["field_type"] = "volume"
+    results.append(volume_result)
 
     return results
