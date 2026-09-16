@@ -14,7 +14,7 @@ from rapidfuzz import fuzz
 # Extensible configuration of fields and their common representations
 FIELD_ALIASES = {
     "mrp": ["mrp", "m.r.p", "maximum retail price"],
-    "net_quantity": ["net quantity", "net qty", "net wt", "net weight", "net vt"],
+    "net_quantity": ["net quantity", "net qty", "net wt", "net weight", "net vt", "net content"],
     "volume": ["volume", "vol"],
     "manufacturer": ["manufacturer", "mfg by", "manufactured by"],
     "packer": ["packer", "pkd by", "packed by"],
@@ -22,7 +22,8 @@ FIELD_ALIASES = {
     "pack_date": ["packed date", "pkd date", "pack date"],
     "mfg_date": ["mfg date", "manufacturing date", "pkd"],
     "best_before": ["best before", "use by", "expiry"],
-    "consumer_care": ["consumer care", "customer care"]
+    "consumer_care": ["consumer care", "customer care"],
+    "usp": ["usp", "u.s.p", "u s p", "unit sale price"]
 }
 
 # Currency indicators for context checking (used to boost weak MRP matches)
@@ -130,14 +131,21 @@ def fuzzy_match_fields(text: str) -> list[dict[str, Any]]:
         else:
             # General fields require at least 75% similarity
             if best_sim >= 75.0:
-                matches.append({
-                    "field": field,
-                    "matched_text": best_ng,
-                    "canonical_text": best_canonical,
-                    "similarity": round(best_sim, 2),
-                    "confidence_modifier": 1.0,
-                    "reason": f"fuzzy-{field}"
-                })
+                # Protect against standalone "content" matching "net content"
+                if best_canonical == "net content" and best_sim < 80.0:
+                    pass
+                # Protect against "ol" and "0l" matching "vol"
+                elif best_canonical == "vol" and best_sim < 90.0:
+                    pass
+                else:
+                    matches.append({
+                        "field": field,
+                        "matched_text": best_ng,
+                        "canonical_text": best_canonical,
+                        "similarity": round(best_sim, 2),
+                        "confidence_modifier": 1.0,
+                        "reason": f"fuzzy-{field}"
+                    })
                 
     # Deduplicate: pick the strongest match per field
     final_matches = []
@@ -148,6 +156,35 @@ def fuzzy_match_fields(text: str) -> list[dict[str, Any]]:
             final_matches.append(best)
             
     return final_matches
+
+
+def _bbox_center(bbox: list[list[float]]) -> tuple[float, float]:
+    xs = [p[0] for p in bbox]
+    ys = [p[1] for p in bbox]
+    return sum(xs) / 4.0, sum(ys) / 4.0
+
+def _bbox_height(bbox: list[list[float]]) -> float:
+    ys = [p[1] for p in bbox]
+    return max(ys) - min(ys)
+
+def _has_volume_context(region: dict[str, Any], all_regions: list[dict[str, Any]]) -> bool:
+    """Check if there is a liquid volume quantity (digit + ml/l/etc) nearby or in the same region."""
+    vol_unit_re = re.compile(r'\d[\s]*([mM][lL]|[lL]|[lL]itre[s]?|[lL]iter[s]?)\b')
+    
+    if vol_unit_re.search(region["text"]):
+        return True
+        
+    rx, ry = _bbox_center(region["bbox"])
+    rh = _bbox_height(region["bbox"])
+    
+    for other in all_regions:
+        if other is region:
+            continue
+        ox, oy = _bbox_center(other["bbox"])
+        if abs(oy - ry) < rh * 2.0 and abs(ox - rx) < rh * 5.0:
+            if vol_unit_re.search(other["text"]):
+                return True
+    return False
 
 
 def classify_fields(extracted_regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -171,6 +208,11 @@ def classify_fields(extracted_regions: list[dict[str, Any]]) -> list[dict[str, A
         fuzzy_results = fuzzy_match_fields(text)
         
         for result in fuzzy_results:
+            # Contextual restriction for 'vol' alias
+            if result["canonical_text"] == "vol":
+                if not _has_volume_context(region, extracted_regions):
+                    continue
+                    
             entry = region.copy()
             entry["field_type"] = result["field"]
             entry["confidence"] = min(1.0, entry.get("confidence", 1.0) * result["confidence_modifier"])
