@@ -12,9 +12,4 @@ An end-to-end FastAPI + React MVP for verifying packaged-commodity labels agains
 
 ## Setup
 
-FRONTENDDDDDDDDDDDDDDDDDD
-...
-bivbb upuhu h
-['i hi 
-ij
-pk 
+
