@@ -10,5 +10,7 @@ An end-to-end FastAPI + React MVP for verifying packaged-commodity labels agains
 *   **Resolution:** The OCR pipeline ingests images natively at 1:1 scale (no aggressive downscaling). However, upscaling (`mag_ratio > 1`) has been tested and shown not to overcome the above limitations for handwriting/embossing.
 *   **Handling:** The application fails safely. Illegible text (<20% confidence) or missing keywords will route the scan to `UNCERTAIN` and flag it for manual review in the dashboard queab
 
-abhiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii
+## Setup
+
+FRONTENDDDDDDDDDDDDDDDDDD
 ...
