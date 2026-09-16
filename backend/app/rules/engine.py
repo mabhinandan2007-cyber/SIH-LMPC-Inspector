@@ -61,6 +61,18 @@ def _extract_date_numbers(text: str) -> set[str]:
     return bad
 
 
+
+def _extract_usp_numbers(text: str) -> set[str]:
+    """Extract numbers explicitly marked as USP."""
+    bad: set[str] = set()
+    for m in re.finditer(
+        r"(?:usp|u\.s\.p\.?|unit sale price)\s*[:\-]?\s*(?:rs\.?|inr|₹|f)?\s*(\d+(?:[.\-]\d+)?)",
+        text.lower(),
+    ):
+        bad.add(m.group(1).replace("-", "."))
+    return bad
+
+
 def _extract_phone_numbers(text: str) -> set[str]:
     """Return a set of 8–14 digit strings that look like phone / barcode numbers."""
     return {m.group(0) for m in re.finditer(r"\b\d{8,14}\b", text)}
@@ -74,7 +86,7 @@ def _extract_unit_prices(text: str) -> set[str]:
     bad: set[str] = set()
     for m in re.finditer(
         r"\b(\d+(?:[.\-]\d+)?)\s*(?:/|per\s*)"
-        r"(g|kg|ml|l|mg|gms|grams|litres?|liters?|m)\b",
+        r"(g|kg|ml|l|mg|gms|grams|litres?|liters?|m|9)\b",
         text.lower(),
     ):
         bad.add(m.group(1).replace("-", "."))
@@ -204,6 +216,18 @@ def evaluate_field_rule(
     return {"status": "uncertain", "rule_clause": rule_clause, "detail": detail}
 
 
+def parse_cross_reference(text: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Detect if the text explicitly defers the value to another package location.
+    Returns (phrase, location) if found, else (None, None).
+    """
+    pattern = r"(see\s*[\-\:]?\s*(bottom|base|crimp|below|underside|reverse|back(?:\s*of\s*pack)?))"
+    match = re.search(pattern, text.lower())
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    return None, None
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MRP Rule — Rule 6(1)(e)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -240,7 +264,21 @@ def evaluate_mrp_rule(
     best_overall_candidate: Optional[dict] = None
 
     for field in mrp_fields:
-        if field.get("confidence", 1.0) < 0.1:
+        conf = field.get("confidence", 1.0)
+        reason = field.get("reason", "")
+
+        # Tiered confidence policy for MRP fallback verification
+        # Strong explicit context (labels) can be rescued even at very low confidence
+        if reason in ("explicit-mrp-label", "fuzzy-mrp", "fuzzy-mrp+context"):
+            min_conf = 0.01
+        # Currency context is valid MRP context, but requires a slightly higher floor
+        elif reason == "currency-pattern-only":
+            min_conf = 0.05
+        # Unknown/other context defaults to the reliable threshold
+        else:
+            min_conf = 0.1
+
+        if conf < min_conf:
             continue
 
         fx, fy = _bbox_center(field["bbox"])
@@ -251,21 +289,64 @@ def evaluate_mrp_rule(
         max_dy_up = f_height * 2.0
         max_dx = f_height * 10.0
 
+        # ── Check for cross-reference ─────────────────────────────────
+        ref_phrase, ref_loc = parse_cross_reference(field["text"])
+        
+        doctr_bboxes: list[dict] = []
+        doctr_text = ""
+        if image_path:
+            doctr_text, doctr_bboxes = verify_price_with_doctr(image_path, field["bbox"])
+
+        if not ref_loc:
+            for reg in raw_regions:
+                if "bbox" not in reg or reg is field:
+                    continue
+                rx, ry = _bbox_center(reg["bbox"])
+                dx, dy = rx - fx, ry - fy
+                if -max_dy_up <= dy <= max_dy_down and -max_dx <= dx <= max_dx:
+                    ref_phrase, ref_loc = parse_cross_reference(reg["text"])
+                    if ref_loc:
+                        break
+                        
+        if not ref_loc and doctr_bboxes and isinstance(doctr_bboxes, list):
+            for dbbox in doctr_bboxes:
+                rx, ry = _bbox_center(dbbox["bbox"])
+                dx, dy = rx - fx, ry - fy
+                if -max_dy_up * 1.5 <= dy <= max_dy_down * 1.5 and -max_dx * 1.5 <= dx <= max_dx * 1.5:
+                    ref_phrase, ref_loc = parse_cross_reference(dbbox["text"])
+                    if ref_loc:
+                        break
+        
+        if ref_loc:
+            return {
+                "status": "REFERENCED_LOCATION",
+                "rule_clause": "Rule 6(1)(e)",
+                "detail": f"MRP value deferred to {ref_loc}.",
+                "field": "MRP",
+                "value": None,
+                "reference": ref_loc,
+                "reference_phrase": ref_phrase,
+                "raw_text": field["text"],
+                "label_bbox": field["bbox"],
+                "value_bbox": None,
+                "confidence": field.get("confidence", 1.0),
+                "selection_reason": "cross-reference",
+            }
+
         # ── Build bad-numbers blacklist ──────────────────────────────
         bad_numbers: set[str] = set()
 
-        doctr_bboxes: list[dict] = []
-        if image_path:
-            doctr_text, doctr_bboxes = verify_price_with_doctr(image_path, field["bbox"])
-            if doctr_text:
-                bad_numbers |= _extract_date_numbers(doctr_text)
-                bad_numbers |= _extract_unit_prices(doctr_text)
-                bad_numbers |= _extract_phone_numbers(doctr_text)
+        if image_path and doctr_text:
+            bad_numbers |= _extract_date_numbers(doctr_text)
+            bad_numbers |= _extract_unit_prices(doctr_text)
+            bad_numbers |= _extract_phone_numbers(doctr_text)
+            bad_numbers |= _extract_usp_numbers(doctr_text)
 
         full_easyocr_text = " ".join(r["text"] for r in raw_regions)
         bad_numbers |= _extract_date_numbers(full_easyocr_text)
         bad_numbers |= _extract_unit_prices(full_easyocr_text)
         bad_numbers |= _extract_phone_numbers(full_easyocr_text)
+        bad_numbers |= _extract_usp_numbers(full_easyocr_text)
 
         # ── Candidate scoring function ──────────────────────────────
         def score_mrp_candidate(text: str) -> tuple[float, Optional[str]]:
@@ -390,33 +471,31 @@ _UNIT_ALIASES: dict[str, str] = {
 }
 
 
-def evaluate_net_quantity_rule(
-    netqty_fields: list[dict],
+def _evaluate_physical_quantity_rule(
+    fields: list[dict],
     raw_regions: list[dict],
+    field_id: str,
+    semantic_field: str,
+    rule_clause: str,
+    unit_regex: str,
+    unit_aliases: dict[str, str],
     image_path: Optional[str] = None,
 ) -> Verdict:
     """
-    Evaluate the Net Quantity declaration using unit-aware spatial
-    candidate scoring.
-
-    Only candidates that contain a recognised physical unit
-    (g, kg, mg, ml, l, etc.) are considered.  Units are normalised
-    to a canonical form (e.g. ``gms`` → ``g``).
-
-    The blacklist excludes dates, MRP-prefixed prices, phone numbers,
-    and per-unit prices (e.g. ``0.83/ml``) from candidacy.
+    Shared helper to evaluate physical quantities (Net Quantity, Volume)
+    using unit-aware spatial candidate scoring.
     """
-    if not netqty_fields:
+    if not fields:
         return {
             "status": "uncertain",
-            "rule_clause": "Rule 6(1)(c)",
-            "detail": "No net_quantity keywords found on the label. Manual review required.",
+            "rule_clause": rule_clause,
+            "detail": "No {field_id} keywords found on the label. Manual review required.",
         }
 
     best_overall_score: float = -9999
     best_overall_candidate: Optional[dict] = None
 
-    for field in netqty_fields:
+    for field in fields:
         if field.get("confidence", 1.0) < 0.1:
             continue
 
@@ -436,6 +515,7 @@ def evaluate_net_quantity_rule(
             if doctr_text:
                 bad_numbers |= _extract_date_numbers(doctr_text)
                 bad_numbers |= _extract_phone_numbers(doctr_text)
+                bad_numbers |= _extract_usp_numbers(doctr_text)
                 bad_numbers |= _extract_unit_prices(doctr_text)
                 # Blacklist numbers preceded by MRP/currency indicators
                 for m in re.finditer(
@@ -447,6 +527,7 @@ def evaluate_net_quantity_rule(
         full_easyocr_text = " ".join(r["text"] for r in raw_regions)
         bad_numbers |= _extract_date_numbers(full_easyocr_text)
         bad_numbers |= _extract_phone_numbers(full_easyocr_text)
+        bad_numbers |= _extract_usp_numbers(full_easyocr_text)
         bad_numbers |= _extract_unit_prices(full_easyocr_text)
         for m in re.finditer(
             r"\b(?:mrp|rs\.?|inr|₹)\s*[:\-]?\s*(\d+[.\-]\d+|\d+)(?:/-)?",
@@ -463,10 +544,7 @@ def evaluate_net_quantity_rule(
             or ``(-9999, None, None, None)`` if no unit-bearing number
             is found.
             """
-            matches = list(re.finditer(
-                r"(?i)\b(\d+(?:[.\-]\d+)?)\s*(g|gm|gms|grams|kg|mg|ml|l|litres?|liters?)\b",
-                text.lower(),
-            ))
+            matches = list(re.finditer(unit_regex, text.lower()))
             if not matches:
                 return -9999, None, None, None
 
@@ -478,7 +556,7 @@ def evaluate_net_quantity_rule(
             for m in matches:
                 val_str = m.group(1).replace("-", ".")
                 unit_str = m.group(2).lower()
-                norm_unit = _UNIT_ALIASES.get(unit_str, unit_str)
+                norm_unit = unit_aliases.get(unit_str, unit_str)
 
                 val_score = 100.0  # base score for having a valid unit
                 if val_str in bad_numbers:
@@ -575,11 +653,13 @@ def evaluate_net_quantity_rule(
     if best_overall_candidate and best_overall_score > -500:
         return {
             "status": "present",
-            "rule_clause": "Rule 6(1)(c)",
-            "detail": f"Valid net_quantity declaration found: '{best_overall_candidate['raw_text']}'",
-            "field": "NET_QUANTITY",
+            "rule_clause": rule_clause,
+            "detail": f"Valid {field_id} declaration found: '{best_overall_candidate['raw_text']}'",
+            "field": semantic_field,
             "value": float(best_overall_candidate["value"]),
             "unit": best_overall_candidate["unit"],
+            "normalized_value": float(best_overall_candidate["value"]),
+            "normalized_unit": best_overall_candidate["unit"],
             "raw_text": best_overall_candidate["raw_text"],
             "label_bbox": best_overall_candidate["label_bbox"],
             "value_bbox": best_overall_candidate["bbox"],
@@ -588,12 +668,108 @@ def evaluate_net_quantity_rule(
 
     return {
         "status": "uncertain",
-        "rule_clause": "Rule 6(1)(c)",
-        "detail": "No valid net_quantity declaration detected - needs manual confirmation.",
+        "rule_clause": rule_clause,
+        "detail": f"No valid {field_id} declaration detected - needs manual confirmation.",
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+def evaluate_net_quantity_rule(
+    netqty_fields: list[dict],
+    raw_regions: list[dict],
+    image_path: Optional[str] = None,
+) -> Verdict:
+    """Evaluate the Net Quantity declaration."""
+    unit_regex = r"(?i)\b(\d+(?:[.\-]\d+)?)\s*(g|gm|gms|grams|kg|mg|ml|l|litres?|liters?)\b"
+    return _evaluate_physical_quantity_rule(
+        fields=netqty_fields,
+        raw_regions=raw_regions,
+        field_id="net_quantity",
+        semantic_field="NET_QUANTITY",
+        rule_clause="Rule 6(1)(c)",
+        unit_regex=unit_regex,
+        unit_aliases=_UNIT_ALIASES,
+        image_path=image_path
+    )
+
+def evaluate_volume_rule(
+    volume_fields: list[dict],
+    raw_regions: list[dict],
+    image_path: Optional[str] = None,
+) -> Verdict:
+    """Evaluate the Volume declaration."""
+    unit_regex = r"(?i)\b(\d+(?:[.\-]\d+)?)\s*(ml|mi|l|litres?|liters?)\b"
+    return _evaluate_physical_quantity_rule(
+        fields=volume_fields,
+        raw_regions=raw_regions,
+        field_id="volume",
+        semantic_field="VOLUME",
+        rule_clause="Rule 6(1)(c)",
+        unit_regex=unit_regex,
+        unit_aliases={"litres": "l", "liters": "l", "litre": "l", "liter": "l", "mi": "ml"},
+        image_path=image_path
+    )
+
+
+
+def evaluate_usp_rule(
+    usp_fields: list[dict],
+    raw_regions: list[dict],
+    image_path: Optional[str] = None,
+) -> Verdict:
+    """Evaluate Unit Sale Price (USP)."""
+    pass
+        
+    for field in usp_fields:
+        text = field["text"].lower()
+        # Find explicit USP pattern in the field text
+        for m in re.finditer(
+            r"(?:usp|u\.s\.p\.?|unit sale price)\s*[:\-]?\s*(?:rs\.?|inr|₹|f)?\s*(\d+(?:[.\-]\d+)?(?:\s*/\s*[a-z0-9]+)?)",
+            text
+        ):
+            val_str = m.group(1)
+            return {
+                "status": "present",
+                "rule_clause": "N/A",
+                "detail": f"Valid USP found: '{val_str}'",
+                "field": "USP",
+                "value": val_str,
+                "raw_text": field["text"],
+                "span_text": val_str,
+                "is_sub_span": True,
+                "label_bbox": field["bbox"],
+                "value_bbox": field["bbox"],  # Retain parent bbox for same-box extraction
+                "confidence": field.get("confidence", 1.0)
+            }
+            
+    # Try raw regions
+    full_text = " ".join(r["text"] for r in raw_regions)
+    for m in re.finditer(
+        r"(?:usp|u\.s\.p\.?|unit sale price)\s*[:\-]?\s*(?:rs\.?|inr|₹|f)?\s*(\d+(?:[.\-]\d+)?(?:\s*/\s*[a-z0-9]+)?)",
+        full_text.lower()
+    ):
+        return {
+            "status": "present",
+            "rule_clause": "N/A",
+            "detail": f"Valid USP found: '{m.group(1)}'",
+            "field": "USP",
+            "value": m.group(1),
+            "raw_text": full_text,
+            "span_text": m.group(1),
+            "is_sub_span": True,
+            "label_bbox": usp_fields[0]["bbox"] if usp_fields else None,
+            "value_bbox": usp_fields[0]["bbox"] if usp_fields else None,
+            "confidence": 0.5
+        }
+
+    return {
+        "status": "uncertain",
+        "rule_clause": "N/A",
+        "detail": "No valid USP value detected.",
+    }
+
 # Orchestrator
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -620,5 +796,16 @@ def run_rule_engine(
     netqty_result = evaluate_net_quantity_rule(netqty_fields, raw_regions, image_path)
     netqty_result["field_type"] = "net_quantity"
     results.append(netqty_result)
+
+    volume_fields = [f for f in classified_fields if f["field_type"] == "volume"]
+    volume_result = evaluate_volume_rule(volume_fields, raw_regions, image_path)
+    volume_result["field_type"] = "volume"
+    results.append(volume_result)
+
+    usp_fields = [f for f in classified_fields if f["field_type"] == "usp"]
+    usp_result = evaluate_usp_rule(usp_fields, raw_regions, image_path)
+    if usp_result["status"] == "present":
+        usp_result["field_type"] = "usp"
+        results.append(usp_result)
 
     return results
