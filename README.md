@@ -11,4 +11,6 @@ An end-to-end FastAPI + React MVP for verifying packaged-commodity labels agains
 *   **Handling:** The application fails safely. Illegible text (<20% confidence) or missing keywords will route the scan to `UNCERTAIN` and flag it for manual review in the dashboard queue.
 
 ## Setup
+
+HIIII ABHINANDANNNNNNNNNNNNN
 ...
