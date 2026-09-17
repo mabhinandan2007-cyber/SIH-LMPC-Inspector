@@ -2,7 +2,7 @@
 Declaration Extraction Engine — Extracts statutory declarations from raw OCR regions.
 
 Converts OCR text detections and spatial coordinates into structured DeclarationField
-objects (specifically MRP and NET_QUANTITY for Version 1) for downstream processing
+objects (specifically MRP, NET_QUANTITY, and MANUFACTURER) for downstream processing
 by the Legal Metrology Rules Engine.
 
 This module is strictly an extraction layer and does not evaluate legal compliance.
@@ -143,10 +143,21 @@ _STANDALONE_QTY_RE = re.compile(
     rf"(?i)\b(\d+(?:\.\d+)?)\s*({_QTY_UNITS_PATTERN})\b"
 )
 
+# Manufacturer label indicators (e.g. "Manufactured by:", "Mfd. by:", "Mfg. by:", "Manufactured & Packed by:")
+_MFG_LABEL_RE = re.compile(
+    r"(?i)\b(?:manufactured\s*(?:&|and)\s*packed\s*by|manufactured\s*by|mfd\.?\s*by|mfg\.?\s*by)\b[\s:.\-]*"
+)
+
 # Blacklist / negative filters
 _DATE_RE = re.compile(r"\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b")
 _DATE_UNIT_RE = re.compile(
     r"(?i)\b\d+\s*(?:days?|months?|years?|weeks?|hours?|mins?)\b"
+)
+_CUSTOMER_CARE_RE = re.compile(
+    r"(?i)\b(?:customer\s*care|consumer\s*care|care\s*line|helpline|toll\s*free|feedback|contact\s*us|call\s*us)\b"
+)
+_NON_MFG_HEADER_RE = re.compile(
+    r"(?i)\b(?:batch(?:\s*no)?|mfg(?:\s*date)?|exp(?:iry)?(?:\s*date)?|best\s*before|use\s*by|packed\s*date|pkd|date\s*:)\b"
 )
 
 
@@ -228,6 +239,32 @@ def _calculate_spatial_score(
         elif -2 <= idx_diff < 0:
             return 200.0 - abs(idx_diff) * 50.0
         return -9999.0
+
+
+def _is_valid_mfg_candidate(text: str) -> bool:
+    """Validate that a candidate string can reasonably represent a manufacturer name."""
+    t = text.strip()
+    if not t or len(t) < 2:
+        return False
+    if not re.search(r"[a-zA-Z]{2,}", t):
+        return False
+    if _MRP_LABEL_RE.search(t):
+        return False
+    if _NET_QTY_LABEL_RE.search(t):
+        return False
+    if _STANDALONE_QTY_RE.search(t):
+        return False
+    if _DATE_RE.search(t):
+        return False
+    if _CUSTOMER_CARE_RE.search(t):
+        return False
+    if _NON_MFG_HEADER_RE.search(t):
+        return False
+    if _STANDALONE_PRICE_RE.fullmatch(t):
+        return False
+    if re.match(r"^[\d\s+\-()/:.]+$", t):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +470,102 @@ def _extract_net_quantity(raw_regions: list[dict]) -> Optional[DeclarationField]
     )
 
 
+def _extract_manufacturer(raw_regions: list[dict]) -> Optional[DeclarationField]:
+    """
+    Extract Manufacturer declaration from OCR regions.
+
+    Supports same-box extraction and spatial/reading-order association across separate
+    label and value boxes (e.g., 'Manufactured by:', 'Manufactured & Packed by:', 'Mfd. by:').
+    Filters out non-manufacturer items like MRP, quantities, dates, and customer care.
+    """
+    candidates: list[dict[str, Any]] = []
+
+    for idx, reg in enumerate(raw_regions):
+        text = str(reg.get("text", "") or "").strip()
+        conf = max(0.0, min(1.0, float(reg.get("confidence", 1.0))))
+        source = reg.get("source") or reg.get("engine")
+        bbox = reg.get("bbox")
+
+        m = _MFG_LABEL_RE.search(text)
+        if not m:
+            continue
+
+        # 1. Check same-box match (e.g. "Manufactured by: ABC Foods Pvt Ltd")
+        val_candidate = text[m.end():].lstrip(" :-\t").rstrip(" ,;").strip()
+        if val_candidate and len(val_candidate) >= 2 and _is_valid_mfg_candidate(val_candidate):
+            score = 2000.0 + conf * 100.0
+            candidates.append({
+                "score": score,
+                "field": "MANUFACTURER",
+                "value": val_candidate,
+                "raw_text": text,
+                "confidence": conf,
+                "bbox": bbox,
+                "source": source,
+                "extraction_method": "pattern_match",
+            })
+            continue
+
+        # 2. Separate regions: label in this box, search nearby regions for manufacturer name
+        best_cand_reg = None
+        best_score = 0.0
+        best_val = None
+
+        for c_idx, c_reg in enumerate(raw_regions):
+            if c_idx == idx:
+                continue
+            c_text = str(c_reg.get("text", "") or "").strip()
+            clean_c_val = c_text.lstrip(" :-\t").rstrip(" ,;").strip()
+            if not _is_valid_mfg_candidate(clean_c_val):
+                continue
+            if _MFG_LABEL_RE.match(c_text):
+                continue
+
+            sp_score = _calculate_spatial_score(reg, idx, c_reg, c_idx)
+            c_conf = max(0.0, min(1.0, float(c_reg.get("confidence", 1.0))))
+            total_sp_score = sp_score + c_conf * 50.0
+
+            if total_sp_score > best_score:
+                best_score = total_sp_score
+                best_cand_reg = c_reg
+                best_val = clean_c_val
+
+        if best_cand_reg is not None and best_val is not None:
+            c_conf = max(0.0, min(1.0, float(best_cand_reg.get("confidence", 1.0))))
+            comb_conf = round(min(conf, c_conf), 4)
+            c_bbox = best_cand_reg.get("bbox")
+            c_source = (
+                best_cand_reg.get("source")
+                or best_cand_reg.get("engine")
+                or source
+            )
+            combined_raw = f"{text} {str(best_cand_reg.get('text', '') or '').strip()}".strip()
+            candidates.append({
+                "score": best_score,
+                "field": "MANUFACTURER",
+                "value": best_val,
+                "raw_text": combined_raw,
+                "confidence": comb_conf,
+                "bbox": c_bbox,
+                "source": c_source,
+                "extraction_method": "spatial_association",
+            })
+
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda c: c["score"])
+    return DeclarationField(
+        field=best["field"],
+        value=best["value"],
+        raw_text=best["raw_text"],
+        confidence=best["confidence"],
+        bbox=best["bbox"],
+        source=best["source"],
+        extraction_method=best["extraction_method"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -444,7 +577,7 @@ def extract_declarations(
     """
     Extract statutory declaration fields from raw OCR regions.
 
-    In Version 1, extracts MRP and NET_QUANTITY using pattern matching and spatial association.
+    Extracts MRP, NET_QUANTITY, and MANUFACTURER using pattern matching and spatial association.
 
     Args:
         raw_regions: List of OCR region dicts (typically with 'text', 'confidence', 'bbox', 'source').
@@ -462,6 +595,10 @@ def extract_declarations(
     net_qty_field = _extract_net_quantity(raw_regions)
     if net_qty_field is not None:
         declarations.append(net_qty_field)
+
+    mfg_field = _extract_manufacturer(raw_regions)
+    if mfg_field is not None:
+        declarations.append(mfg_field)
 
     overall_confidence: Optional[float] = None
     if declarations:
